@@ -1,0 +1,61 @@
+# Среда запуска: сервис + база данных + система наблюдаемости.
+# Запуск:      docker compose up -d --build
+# Остановка:   docker compose down          (данные в томах сохраняются)
+# Всё стереть: docker compose down -v
+
+services:
+  app:
+    image: ${BOOKING_IMAGE:-booking-service}:${IMAGE_TAG:-local}
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-booking}:${POSTGRES_PASSWORD:-booking}@db:5432/${POSTGRES_DB:-booking}
+      # --- OpenTelemetry: куда отправлять логи, метрики и трассировки ---
+      OTEL_SERVICE_NAME: booking-service
+      OTEL_RESOURCE_ATTRIBUTES: service.version=${IMAGE_TAG:-local},deployment.environment=local
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+    depends_on:
+      db:
+        condition: service_healthy
+      lgtm:
+        condition: service_started
+    restart: unless-stopped
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-booking}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-booking}
+      POSTGRES_DB: ${POSTGRES_DB:-booking}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Grafana + Prometheus (метрики) + Loki (логи) + Tempo (трассировки)
+  # + OpenTelemetry Collector — всё в одном контейнере. Только для учёбы и разработки.
+  lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "3000:3000"   # Grafana (логин admin / admin)
+      - "4318:4318"   # приём OTLP по HTTP
+      - "9090:9090"   # Prometheus
+    volumes:
+      - lgtm-data:/data
+      # Правило алерта «появились ошибки 5xx» подключается автоматически
+      - ./observability/grafana-alerts.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/booking-alerts.yaml:ro
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  lgtm-data:

@@ -1,0 +1,125 @@
+# CI/CD: сборка → тесты → версионированный образ → хранилище (GHCR) → согласование → развертывание
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]        # git tag v0.1.0 → образ с версией 0.1.0
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # 1. Сборка и автоматические тесты
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Установить зависимости
+        run: pip install -r requirements-dev.txt
+
+      - name: Линтер (ruff)
+        run: ruff check .
+
+      - name: Тесты (pytest)
+        run: |
+          mkdir -p reports
+          pytest -v --junitxml=reports/junit.xml
+
+      - name: Сохранить отчёт о тестах
+        if: always()                     # отчёт сохраняется и при падении тестов
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-report
+          path: reports/
+
+  # 2. Создание версионированного артефакта и публикация в хранилище
+  build:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: vars
+        name: Имя образа (в нижнем регистре)
+        run: |
+          IMAGE="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - id: meta
+        name: Теги версии
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}},priority=50
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Вход в GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Сборка и публикация образа
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: APP_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 3. Развертывание — только после ручного согласования (environment "production")
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Вход в GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Развернуть конкретную версию и проверить
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}:${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          echo "Разворачиваю ${IMAGE}"
+          docker run -d --name booking -p 8000:8000 -e OTEL_SDK_DISABLED=true "${IMAGE}"
+          for i in $(seq 1 30); do
+            curl -fs http://localhost:8000/health && break
+            sleep 1
+          done
+          curl -fs http://localhost:8000/version | tee version.json
+          grep -q "\"${VERSION}\"" version.json
+          echo "### Развернута версия ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Образ: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"

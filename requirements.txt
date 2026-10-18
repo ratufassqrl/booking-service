@@ -1,0 +1,12 @@
+fastapi==0.143.3
+uvicorn==0.54.0
+sqlalchemy==2.0.55  # 2.1 пока не поддерживается инструментацией OpenTelemetry
+psycopg[binary]==3.3.6
+pydantic==2.14.1
+
+# OpenTelemetry: логи, метрики и трассировки без изменения кода
+opentelemetry-distro==0.66b1
+opentelemetry-exporter-otlp==1.45.1
+opentelemetry-instrumentation-fastapi==0.66b1
+opentelemetry-instrumentation-sqlalchemy==0.66b1
+opentelemetry-instrumentation-logging==0.66b1

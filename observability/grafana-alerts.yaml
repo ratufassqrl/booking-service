@@ -1,0 +1,50 @@
+# Правило алерта Grafana: «Обнаружение отклонения» из диаграмм.
+# Срабатывает, если за последнюю минуту сервис вернул хотя бы один ответ 5xx.
+# Метрика booking_errors создаётся в app/main.py; в Prometheus у счётчика
+# появляется суффикс _total.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: booking-service
+    folder: Booking
+    interval: 30s
+    rules:
+      - uid: booking-5xx
+        title: "Booking: ответы 5xx"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(increase(booking_errors_total[1m])) or vector(0)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+          service: booking-service
+        annotations:
+          summary: "Сервис бронирования вернул ошибки 5xx"
+          description: "Откройте Explore → Loki и найдите записи уровня ERROR, затем заведите задачу в GitHub Issues."
